@@ -1,21 +1,21 @@
 """
-USD/JPY 15分足 自動売買ボット
+USD/JPY 自動売買ボット
 ────────────────────────────────────────────────────────────────────────────────
-戦略:
-  エントリー条件（3つ全て揃ったところ）:
-    ① 3MA  : 価格がMAの上（ロング）/ 下（ショート）
-    ② 波形  : 高値・安値の更新方向（上昇トレンド / 下降トレンド）
-    ③ RSI  : 50超（ロング）/ 50未満（ショート）
-
-徹底事項:
-    - 夜中はエントリーしない（22:00–07:00 JST）
-    - シグナルだけで入らない（3条件必須）
-    - 損切りの根拠を持たせる（20pips / 直近スイング）
+トレードルーティン:
+  ① 環境認識（HTFで水平線・レジサポ特定）
+  ② トレンド/レンジ判定（5分足MA + 波形）
+  ③ エントリー（3条件揃ったところ）:
+       トレンド: 押し・戻しのPO（SMA5×SMA20）で順張り
+       レンジ : (a)ブレイクアウト  (b)上限下限逆張り
+  ④ TP/SL管理:
+       20pips伸びたら建値検討 → 1分足で継続確認 → 30~40pips目標
+  ⑤ 禁則事項:
+       - 深夜（01:00–08:00 JST = 16:00–23:00 UTC）は静観
+       - 飛び乗り禁止（価格がMAから離れすぎ）
+       - 方向感ゼロのときは静観
 
 Usage:
     python bot.py [--dry-run]
-
-    --dry-run : シグナル確認のみ・注文は出さない
 ────────────────────────────────────────────────────────────────────────────────
 """
 
@@ -29,9 +29,15 @@ from datetime import datetime, timezone
 
 from trading_bot import config
 from trading_bot.broker import OANDABroker
-from trading_bot.strategy import Signal, evaluate
+from trading_bot.strategy import Signal, MarketState, evaluate
+from trading_bot.timeframes import build_mtf_context
+from trading_bot.trade_manager import (
+    OpenPosition,
+    PositionRegistry,
+    evaluate_exit,
+)
 
-# ── Logging Setup ──────────────────────────────────────────────────────────────
+# ── Logging ────────────────────────────────────────────────────────────────────
 
 def _setup_logging() -> None:
     fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -47,100 +53,179 @@ def _setup_logging() -> None:
 
 logger = logging.getLogger("bot")
 
+# Global position registry (persists across cycles within a process run)
+registry = PositionRegistry()
 
-# ── Single Cycle ──────────────────────────────────────────────────────────────
 
-def run_cycle(broker: OANDABroker, dry_run: bool = False) -> None:
-    """Execute one evaluation cycle."""
-    now = datetime.now(timezone.utc)
-    logger.info("─── Cycle start: %s ───", now.strftime("%Y-%m-%d %H:%M UTC"))
+# ── Trade Management Cycle ─────────────────────────────────────────────────────
 
-    # 1. Fetch candles
-    df = broker.fetch_candles()
-    if df is None or df.empty:
-        logger.warning("Failed to fetch candles. Skipping cycle.")
+def manage_open_positions(broker: OANDABroker, dry_run: bool) -> None:
+    """
+    ポジション管理サイクル。
+    利確SLは、20pips伸びた後に1分足で判定。
+    """
+    if len(registry) == 0:
         return
 
-    # 2. Evaluate strategy
-    setup = evaluate(df, now=now)
+    # Sync registry against broker open trades
+    open_from_broker = {t["id"] for t in broker.get_open_trades()}
+
+    for pos in registry.all():
+        # Trade was closed externally (SL/TP hit)
+        if pos.trade_id not in open_from_broker:
+            logger.info("Trade %s closed externally (SL/TP).", pos.trade_id)
+            registry.remove(pos.trade_id)
+            continue
+
+        # Get current price
+        df_m1 = broker.fetch_candles(granularity=config.TF_M1, count=5)
+        if df_m1 is None or df_m1.empty:
+            continue
+        current_price = float(df_m1["close"].iloc[-1])
+
+        decision = evaluate_exit(pos, current_price, broker)
+
+        logger.info(
+            "ポジション管理 [%s] %s  現在P/L=+%.1fpips  %s",
+            pos.trade_id, pos.signal.value,
+            decision.current_profit_pips, decision.reason,
+        )
+
+        if decision.should_exit:
+            if dry_run:
+                logger.info("[DRY-RUN] 1分足反転シグナル → クローズ予定 (実際には出しません)")
+            else:
+                closed = broker.close_trade(pos.trade_id)
+                if closed:
+                    logger.info("1分足反転シグナルによりクローズ。+%.1fpips", decision.current_profit_pips)
+                    registry.remove(pos.trade_id)
+
+
+# ── Entry Cycle ────────────────────────────────────────────────────────────────
+
+def run_entry_cycle(broker: OANDABroker, dry_run: bool) -> None:
+    """Execute one entry evaluation cycle."""
+    now = datetime.now(timezone.utc)
+    logger.info("─── エントリーサイクル: %s ───", now.strftime("%Y-%m-%d %H:%M UTC"))
+
+    # 1. Fetch primary (M15) candles
+    df = broker.fetch_candles()
+    if df is None or df.empty:
+        logger.warning("M15データ取得失敗。スキップ。")
+        return
+
+    # 2. Build multi-timeframe context (H1, H4, M5)
+    try:
+        mtf = build_mtf_context(broker)
+    except Exception as exc:
+        logger.warning("MTFコンテキスト取得エラー (継続): %s", exc)
+        mtf = None
+
+    if mtf:
+        logger.info(
+            "上位足 H1=%s  H4=%s  レジスタンス=%s  サポート=%s",
+            mtf.h1_trend, mtf.h4_trend,
+            [f"{r:.3f}" for r in mtf.key_resistances()[:3]],
+            [f"{s:.3f}" for s in mtf.key_supports()[:3]],
+        )
+
+    # 3. Evaluate strategy
+    setup = evaluate(df, now=now, mtf_context=mtf)
 
     logger.info(
-        "Signal: %-5s  Reason: %s",
-        setup.signal.value, setup.reason,
+        "シグナル: %-5s  状態: %s  理由: %s",
+        setup.signal.value,
+        setup.market_state.value if setup.market_state else "-",
+        setup.reason,
     )
 
     if setup.signal == Signal.NONE:
         return
 
-    # Log the full setup details
+    # 4. Log setup details
     logger.info(
-        "  Entry=%.3f  SL=%.3f (%.1f pips)  TP=%.3f (%.1f pips)",
+        "  エントリー=%.3f  SL=%.3f(%.1fpips)  TP=%.3f(%.1fpips)  [%s]",
         setup.entry_price,
         setup.stop_loss, setup.risk_pips,
         setup.take_profit, setup.reward_pips,
+        setup.entry_type,
     )
 
-    if setup.indicators:
-        ind = setup.indicators
-        logger.info(
-            "  3MA=%.3f(%s)  RSI=%.1f(%s)  Wave=%s  Channel=%s",
-            ind["ma3"], ind["ma_direction"],
-            ind["rsi"], ind["rsi_signal"],
-            ind["wave_trend"], ind["channel_type"],
-        )
-
-    # 3. Guard: no double entry
-    if broker.has_open_trade():
-        logger.info("Already have an open trade. Skipping new entry.")
+    # 5. Guard: no double entry
+    if broker.has_open_trade() or len(registry) > 0:
+        logger.info("既存ポジションあり。新規エントリースキップ。")
         return
 
-    # 4. Place order (or dry-run)
+    # 6. Reject if R:R is too low
+    if setup.reward_pips > 0 and (setup.reward_pips / max(setup.risk_pips, 1)) < config.MIN_RISK_REWARD:
+        logger.warning(
+            "R:R不足 (%.1f:%.1f)。スキップ。",
+            setup.risk_pips, setup.reward_pips,
+        )
+        return
+
+    # 7. Place order
     if dry_run:
-        logger.info("[DRY-RUN] Would place %s order. No actual order sent.", setup.signal.value)
+        logger.info("[DRY-RUN] %sオーダー予定。実際には出しません。", setup.signal.value)
         return
 
     trade_id = broker.place_order(setup)
     if trade_id:
-        logger.info("Trade opened. ID=%s", trade_id)
+        registry.add(OpenPosition(
+            trade_id=trade_id,
+            signal=setup.signal,
+            entry_price=setup.entry_price,
+            stop_loss=setup.stop_loss,
+            take_profit=setup.take_profit,
+            units=config.UNITS,
+        ))
+        logger.info("エントリー完了。trade_id=%s", trade_id)
     else:
-        logger.error("Order placement failed.")
+        logger.error("注文失敗。")
 
 
 # ── Main Loop ──────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="USD/JPY 15分足 自動売買ボット")
-    parser.add_argument(
-        "--dry-run", action="store_true",
-        help="シグナル確認のみ。実際の注文は出しません。",
-    )
+    parser = argparse.ArgumentParser(description="USD/JPY 自動売買ボット")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="シグナル確認のみ。実際の注文は出しません。")
     args = parser.parse_args()
 
     _setup_logging()
     logger.info("=" * 60)
     logger.info("USD/JPY 自動売買ボット 起動")
-    logger.info("モード: %s", "DRY-RUN" if args.dry_run else "LIVE")
+    logger.info("モード    : %s", "DRY-RUN" if args.dry_run else "LIVE")
+    logger.info("環境      : %s", config.OANDA_ENVIRONMENT)
+    logger.info("通貨ペア  : %s  %s足", config.INSTRUMENT, config.GRANULARITY)
+    logger.info("ポーリング: %d秒", config.POLL_INTERVAL_SECONDS)
+    logger.info("静観時間帯: 01:00–08:00 JST (UTC 16:00–23:00)")
+    logger.info("ストップ  : %dpips  ブレイクイーブン: %dpips後",
+                config.STOP_LOSS_PIPS, config.BREAKEVEN_TRIGGER_PIPS)
     logger.info("=" * 60)
 
     if not config.OANDA_API_KEY or not config.OANDA_ACCOUNT_ID:
-        logger.error("OANDA_API_KEY / OANDA_ACCOUNT_ID が設定されていません。.envを確認してください。")
+        logger.error("OANDA_API_KEY / OANDA_ACCOUNT_ID が未設定。.envを確認。")
         sys.exit(1)
 
     broker = OANDABroker()
-
     balance = broker.get_account_balance()
     if balance is not None:
-        logger.info("口座残高: %.2f", balance)
+        logger.info("口座残高: %.2f JPY", balance)
 
-    logger.info("ポーリング間隔: %d秒", config.POLL_INTERVAL_SECONDS)
-    logger.info("取引不可時間帯 (UTC): %02d:00 – %02d:00", config.NO_TRADE_START_UTC, config.NO_TRADE_END_UTC)
-
+    tick = 0
     try:
         while True:
+            tick += 1
             try:
-                run_cycle(broker, dry_run=args.dry_run)
+                # ── Manage open positions every tick ──────────────────────────
+                manage_open_positions(broker, dry_run=args.dry_run)
+
+                # ── Look for new entries every tick ───────────────────────────
+                run_entry_cycle(broker, dry_run=args.dry_run)
+
             except Exception as exc:
-                logger.exception("Cycle error (continuing): %s", exc)
+                logger.exception("サイクルエラー(継続): %s", exc)
 
             time.sleep(config.POLL_INTERVAL_SECONDS)
 

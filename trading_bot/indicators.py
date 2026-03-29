@@ -1,11 +1,14 @@
 """
-Technical indicators for the USD/JPY 15-minute strategy.
+Technical indicators for the USD/JPY multi-timeframe strategy.
 
 Implements:
-  - 3MA  : 3-period simple moving average of close
-  - RSI  : 14-period Relative Strength Index
-  - Wave : Swing high/low detection for wave pattern analysis
-  - Channel : Parallel channel detection (上昇チャネル / 下降チャネル)
+  - 3MA / SMA5 / SMA20 / SMA50 : Moving averages
+  - SMA crossover signal         : 短期SMAが中期SMAを抜けた (signal point)
+  - RSI                          : 14-period RSI with extreme zone detection
+  - Wave / Swing                 : Swing high/low detection
+  - Dow theory breakout          : ダウの崩れ detection on M1
+  - Range detection              : MA cluster + no H/L update
+  - Channel                      : Parallel channel
 """
 
 import numpy as np
@@ -256,6 +259,179 @@ def find_key_levels(df: pd.DataFrame, lookback: int = 5, tolerance_pips: float =
     levels.append(sum(current_cluster) / len(current_cluster))
 
     return sorted(levels, reverse=True)
+
+
+# ── SMA Crossover Signal ───────────────────────────────────────────────────────
+
+def sma_crossover(short: pd.Series, mid: pd.Series) -> str:
+    """
+    Detect if short SMA just crossed above/below the mid SMA.
+
+    エントリーシグナル: 短期SMAが中期SMAを抜けた場合
+
+    Returns:
+      'bullish_cross'  – short crossed above mid (buy signal)
+      'bearish_cross'  – short crossed below mid (sell signal)
+      'none'           – no crossover this bar
+    """
+    if len(short) < 2 or len(mid) < 2:
+        return "none"
+    prev_short = short.iloc[-2]
+    prev_mid = mid.iloc[-2]
+    curr_short = short.iloc[-1]
+    curr_mid = mid.iloc[-1]
+    if np.isnan(prev_short) or np.isnan(prev_mid):
+        return "none"
+
+    if prev_short <= prev_mid and curr_short > curr_mid:
+        return "bullish_cross"
+    if prev_short >= prev_mid and curr_short < curr_mid:
+        return "bearish_cross"
+    return "none"
+
+
+def ma_alignment(ma3: pd.Series, sma20: pd.Series, sma50: pd.Series) -> str:
+    """
+    Check if MAs are properly aligned (3MA上 > 20MA > 50MA = bullish).
+
+    トレンド判定: 3MAが綺麗に順番通り並んでいる
+
+    Returns: 'bullish_aligned', 'bearish_aligned', 'clustered', or 'mixed'
+    """
+    if ma3.empty or sma20.empty or sma50.empty:
+        return "mixed"
+    v3 = ma3.iloc[-1]
+    v20 = sma20.iloc[-1]
+    v50 = sma50.iloc[-1]
+    if any(np.isnan(x) for x in (v3, v20, v50)):
+        return "mixed"
+
+    if v3 > v20 > v50:
+        return "bullish_aligned"
+    if v3 < v20 < v50:
+        return "bearish_aligned"
+
+    # Clustered: all MAs within RANGE_MA_CLUSTER_PIPS → ranging
+    spread = max(v3, v20, v50) - min(v3, v20, v50)
+    from trading_bot import config  # avoid circular import
+    if spread <= config.RANGE_MA_CLUSTER_PIPS * config.PIP_VALUE_JPY:
+        return "clustered"
+    return "mixed"
+
+
+# ── Dow Theory Breakout (ダウの崩れ) ────────────────────────────────────────────
+
+def dow_breakout(df: pd.DataFrame, lookback: int = 5) -> str:
+    """
+    Detect Dow theory breakout on the given OHLC data.
+
+    Bullish Dow breakout:  price makes a new higher high above the last swing high
+    Bearish Dow breakdown: price makes a new lower low below the last swing low
+
+    Returns: 'bullish', 'bearish', or 'none'
+    """
+    if len(df) < lookback * 2 + 3:
+        return "none"
+
+    highs = df["high"]
+    lows = df["low"]
+    sh_mask = find_swing_highs(highs, lookback)
+    sl_mask = find_swing_lows(lows, lookback)
+
+    sh_list = highs[sh_mask].tolist()
+    sl_list = lows[sl_mask].tolist()
+
+    latest_high = highs.iloc[-1]
+    latest_low = lows.iloc[-1]
+
+    if len(sh_list) >= 2 and latest_high > sh_list[-1]:
+        return "bullish"
+    if len(sl_list) >= 2 and latest_low < sl_list[-1]:
+        return "bearish"
+    return "none"
+
+
+# ── Range Detection ────────────────────────────────────────────────────────────
+
+def detect_range(df: pd.DataFrame, ma3: pd.Series, sma20: pd.Series,
+                 sma50: pd.Series, lookback: int = 5) -> dict:
+    """
+    Detect if the market is in a range.
+
+    Range conditions (OR logic: either is sufficient):
+      1. No high/low update in recent bars (wave trend = range)
+      2. All three MAs are clustered together
+
+    Returns dict with:
+      is_range       : bool
+      range_high     : float  (top of range)
+      range_low      : float  (bottom of range)
+      ma_cluster     : bool
+      range_bounces  : int    (number of tested levels in range)
+    """
+    highs = df["high"]
+    lows = df["low"]
+
+    sh_mask = find_swing_highs(highs, lookback)
+    sl_mask = find_swing_lows(lows, lookback)
+    sh_list = highs[sh_mask].tolist()
+    sl_list = lows[sl_mask].tolist()
+
+    range_high = sh_list[-1] if sh_list else highs.max()
+    range_low = sl_list[-1] if sl_list else lows.min()
+
+    alignment = ma_alignment(ma3, sma20, sma50)
+    ma_cluster = alignment == "clustered"
+
+    # Count bounces within the range band
+    close = df["close"]
+    pip = 0.01
+    tolerance = 10 * pip
+    bounces = int(((close >= range_low - tolerance) & (close <= range_high + tolerance)).sum())
+
+    wave = detect_wave_pattern(df, lookback)
+    no_trend = wave["trend"] == "range"
+
+    is_range = (ma_cluster or no_trend) and not (wave["higher_high"] and wave["higher_low"]) \
+               and not (wave["lower_high"] and wave["lower_low"])
+
+    return {
+        "is_range": is_range,
+        "range_high": range_high,
+        "range_low": range_low,
+        "ma_cluster": ma_cluster,
+        "range_bounces": bounces,
+        "ma_alignment": alignment,
+    }
+
+
+# ── RSI Extreme Zone Check ─────────────────────────────────────────────────────
+
+def rsi_extreme_filter(rsi_value: float, timeframe: str,
+                       upper: float = 70, lower: float = 30) -> dict:
+    """
+    Check RSI extreme zones and return entry advisory.
+
+    Rules from trading routine:
+      - 5分足でRSI 70/30超: 注意（caution — entry allowed but careful）
+      - 15分足でRSI 70/30超: エントリー控える（avoid entry）
+
+    Returns dict with:
+      in_extreme    : bool
+      advisory      : 'ok' | 'caution' | 'avoid'
+      detail        : str
+    """
+    in_extreme = rsi_value >= upper or rsi_value <= lower
+    if not in_extreme:
+        return {"in_extreme": False, "advisory": "ok", "detail": f"RSI={rsi_value:.1f} 通常"}
+
+    zone = "過買い" if rsi_value >= upper else "過売り"
+    if timeframe in ("M15", "H1", "H4", "D1"):
+        return {"in_extreme": True, "advisory": "avoid",
+                "detail": f"RSI={rsi_value:.1f} {zone}({timeframe}) → エントリー控える"}
+    # M5
+    return {"in_extreme": True, "advisory": "caution",
+            "detail": f"RSI={rsi_value:.1f} {zone}({timeframe}) → 注意"}
 
 
 # ── All-in-one signal aggregation ─────────────────────────────────────────────
