@@ -14,10 +14,26 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ── Broker Selection ───────────────────────────────────────────────────────────
+# Set BROKER=mt5 in .env (or environment) to use MetaTrader 5.
+# Default is "oanda".
+BROKER = os.getenv("BROKER", "oanda").lower()  # "oanda" or "mt5"
+
 # ── OANDA Credentials ──────────────────────────────────────────────────────────
 OANDA_API_KEY = os.getenv("OANDA_API_KEY", "")
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "")
 OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")  # "practice" or "live"
+
+# ── MT5 Credentials ────────────────────────────────────────────────────────────
+MT5_LOGIN = int(os.getenv("MT5_LOGIN", "0"))
+MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
+MT5_SERVER = os.getenv("MT5_SERVER", "")
+
+# ── MT5 Trade Settings ─────────────────────────────────────────────────────────
+MT5_SYMBOL = os.getenv("MT5_SYMBOL", "USDJPY")   # No underscore in MT5
+MT5_LOT_SIZE = float(os.getenv("MT5_LOT_SIZE", "0.01"))  # 0.01 lot = 1000 units
+MT5_MAGIC_NUMBER = int(os.getenv("MT5_MAGIC_NUMBER", "20240101"))
+MT5_DEVIATION = int(os.getenv("MT5_DEVIATION", "10"))  # Max slippage in points
 
 # ── Instrument ─────────────────────────────────────────────────────────────────
 INSTRUMENT = "USD_JPY"

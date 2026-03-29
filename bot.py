@@ -30,6 +30,15 @@ from datetime import datetime, timezone
 from trading_bot import config
 from trading_bot.broker import OANDABroker
 from trading_bot.strategy import Signal, MarketState, evaluate
+
+
+def _create_broker(broker_name: str):
+    """Instantiate the appropriate broker based on name."""
+    if broker_name == "mt5":
+        from trading_bot.broker_mt5 import MT5Broker
+        return MT5Broker()
+    else:
+        return OANDABroker()
 from trading_bot.timeframes import build_mtf_context
 from trading_bot.trade_manager import (
     OpenPosition,
@@ -190,13 +199,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="USD/JPY 自動売買ボット")
     parser.add_argument("--dry-run", action="store_true",
                         help="シグナル確認のみ。実際の注文は出しません。")
+    parser.add_argument(
+        "--broker",
+        choices=["oanda", "mt5"],
+        default=config.BROKER,
+        help="ブローカー選択: oanda (デフォルト) または mt5",
+    )
     args = parser.parse_args()
 
     _setup_logging()
     logger.info("=" * 60)
     logger.info("USD/JPY 自動売買ボット 起動")
     logger.info("モード    : %s", "DRY-RUN" if args.dry_run else "LIVE")
-    logger.info("環境      : %s", config.OANDA_ENVIRONMENT)
+    logger.info("ブローカー: %s", args.broker.upper())
+    if args.broker == "oanda":
+        logger.info("環境      : %s", config.OANDA_ENVIRONMENT)
+    else:
+        logger.info("MT5サーバ : %s", config.MT5_SERVER)
     logger.info("通貨ペア  : %s  %s足", config.INSTRUMENT, config.GRANULARITY)
     logger.info("ポーリング: %d秒", config.POLL_INTERVAL_SECONDS)
     logger.info("静観時間帯: 01:00–08:00 JST (UTC 16:00–23:00)")
@@ -204,11 +223,17 @@ def main() -> None:
                 config.STOP_LOSS_PIPS, config.BREAKEVEN_TRIGGER_PIPS)
     logger.info("=" * 60)
 
-    if not config.OANDA_API_KEY or not config.OANDA_ACCOUNT_ID:
-        logger.error("OANDA_API_KEY / OANDA_ACCOUNT_ID が未設定。.envを確認。")
-        sys.exit(1)
+    # Validate credentials
+    if args.broker == "oanda":
+        if not config.OANDA_API_KEY or not config.OANDA_ACCOUNT_ID:
+            logger.error("OANDA_API_KEY / OANDA_ACCOUNT_ID が未設定。.envを確認。")
+            sys.exit(1)
+    elif args.broker == "mt5":
+        if not config.MT5_LOGIN or not config.MT5_PASSWORD or not config.MT5_SERVER:
+            logger.error("MT5_LOGIN / MT5_PASSWORD / MT5_SERVER が未設定。.envを確認。")
+            sys.exit(1)
 
-    broker = OANDABroker()
+    broker = _create_broker(args.broker)
     balance = broker.get_account_balance()
     if balance is not None:
         logger.info("口座残高: %.2f JPY", balance)
