@@ -81,7 +81,30 @@ class MT5Broker:
     # ── Connection ─────────────────────────────────────────────────────────────
 
     def _connect(self) -> None:
-        """Initialize and log in to the MT5 terminal."""
+        """Initialize and log in to the MT5 terminal.
+
+        First tries to connect to an already-running, logged-in MT5 terminal.
+        Falls back to explicit login if credentials are provided.
+        """
+        # Step 1: Try connecting to already-running terminal (no credentials needed)
+        if mt5.initialize():
+            account = mt5.account_info()
+            if account is not None:
+                logger.info(
+                    "MT5 connected (existing session): account=%d  server=%s",
+                    account.login, account.server,
+                )
+                return
+
+        # Step 2: Try explicit login with credentials from config
+        if not config.MT5_LOGIN or not config.MT5_PASSWORD or not config.MT5_SERVER:
+            error = mt5.last_error()
+            raise ConnectionError(
+                f"MT5 initialize failed: {error}\n"
+                "MT5ターミナルを起動してログインしてから再実行してください。"
+            )
+
+        mt5.shutdown()
         if not mt5.initialize(
             login=config.MT5_LOGIN,
             password=config.MT5_PASSWORD,
