@@ -49,7 +49,7 @@ TF_H1  = "H1"    # 1-hour    : 1時間戻り高値/押安値 + HTFトレンド
 TF_H4  = "H4"    # 4-hour    : 4時間足トレンドフィルター
 TF_D1  = "D1"    # Daily     : 大局確認
 
-HTF_CANDLE_COUNT = 60        # Bars to fetch for higher timeframes
+HTF_CANDLE_COUNT = 30        # Bars to fetch for higher timeframes
 
 # ── Indicator Parameters ───────────────────────────────────────────────────────
 MA_PERIOD = 3                # 3MA (3-period moving average) — primary trend MA
