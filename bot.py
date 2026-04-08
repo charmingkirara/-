@@ -65,6 +65,10 @@ logger = logging.getLogger("bot")
 # Global position registry (persists across cycles within a process run)
 registry = PositionRegistry()
 
+# Cooldown after SL hit: wait this many seconds before next entry
+_COOLDOWN_AFTER_SL_SECONDS = 60 * 45  # 45 minutes (3 M15 bars)
+_last_sl_hit_time: float = 0.0  # Unix timestamp
+
 
 # ── Trade Management Cycle ─────────────────────────────────────────────────────
 
@@ -82,7 +86,12 @@ def manage_open_positions(broker: OANDABroker, dry_run: bool) -> None:
     for pos in registry.all():
         # Trade was closed externally (SL/TP hit)
         if pos.trade_id not in open_from_broker:
-            logger.info("Trade %s closed externally (SL/TP).", pos.trade_id)
+            profit = (float(pos.take_profit) - float(pos.entry_price)) if pos.signal.value == "LONG" else (float(pos.entry_price) - float(pos.take_profit))
+            # Detect SL hit: position closed before TP
+            global _last_sl_hit_time
+            _last_sl_hit_time = time.time()
+            logger.info("Trade %s closed externally (SL/TP). クールダウン開始 (%d分).",
+                        pos.trade_id, _COOLDOWN_AFTER_SL_SECONDS // 60)
             registry.remove(pos.trade_id)
             continue
 
@@ -163,6 +172,13 @@ def run_entry_cycle(broker: OANDABroker, dry_run: bool) -> None:
     # 5. Guard: no double entry
     if broker.has_open_trade() or len(registry) > 0:
         logger.info("既存ポジションあり。新規エントリースキップ。")
+        return
+
+    # 5b. Guard: cooldown after SL hit
+    elapsed = time.time() - _last_sl_hit_time
+    if elapsed < _COOLDOWN_AFTER_SL_SECONDS:
+        remaining = int((_COOLDOWN_AFTER_SL_SECONDS - elapsed) / 60)
+        logger.info("SL後クールダウン中。あと%d分待機。", remaining)
         return
 
     # 6. Reject if R:R is too low
