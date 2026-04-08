@@ -176,6 +176,14 @@ class MT5Broker:
 
     # ── Account ────────────────────────────────────────────────────────────────
 
+    def get_current_price(self) -> Optional[float]:
+        """Return current mid price (bid+ask)/2 for the symbol."""
+        tick = mt5.symbol_info_tick(self._symbol)
+        if tick is None:
+            logger.error("MT5 symbol_info_tick failed: %s", mt5.last_error())
+            return None
+        return (tick.bid + tick.ask) / 2.0
+
     def get_account_balance(self) -> Optional[float]:
         """Return current account balance."""
         info = mt5.account_info()

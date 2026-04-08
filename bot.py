@@ -95,11 +95,15 @@ def manage_open_positions(broker: OANDABroker, dry_run: bool) -> None:
             registry.remove(pos.trade_id)
             continue
 
-        # Get current price
-        df_m1 = broker.fetch_candles(granularity=config.TF_M1, count=5)
-        if df_m1 is None or df_m1.empty:
-            continue
-        current_price = float(df_m1["close"].iloc[-1])
+        # Get current price (real-time tick if available, else M1 close)
+        current_price = None
+        if hasattr(broker, "get_current_price"):
+            current_price = broker.get_current_price()
+        if current_price is None:
+            df_m1 = broker.fetch_candles(granularity=config.TF_M1, count=5)
+            if df_m1 is None or df_m1.empty:
+                continue
+            current_price = float(df_m1["close"].iloc[-1])
 
         decision = evaluate_exit(pos, current_price, broker)
 
