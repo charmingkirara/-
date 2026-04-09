@@ -74,11 +74,67 @@ python backtest.py --count 500
 
 ---
 
+## Windowsタスクスケジューラ設定（ログオン不要で自動起動）
+
+PCを再起動してもボットを自動で起動し、**ログオンしていない状態でもバックグラウンドで動作**させるには `setup_scheduler.ps1` を使います。
+
+### 手順
+
+1. **PowerShellを管理者として実行**（スタートメニューで `powershell` を右クリック → 管理者として実行）
+
+2. **スクリプトを実行**
+
+   ```powershell
+   cd C:\path\to\このフォルダ
+   .\setup_scheduler.ps1
+   ```
+
+3. **Windowsパスワードを入力**
+   - 「ログオンの有無にかかわらず実行」にするためにWindowsアカウントのパスワードが必要です
+   - Microsoftアカウントでサインインしている場合は、先に**ローカルアカウントのパスワード**を設定してください（設定 → アカウント → サインインオプション）
+
+4. **登録確認**
+   - タスクスケジューラ（`taskschd.msc`）を開いて `USDJPYTradingBot` が登録されているか確認
+
+### オプション
+
+| オプション | 説明 | デフォルト |
+|----------|------|---------|
+| `-TaskName` | タスク名 | `USDJPYTradingBot` |
+| `-BotDir` | bot.py があるフォルダ | スクリプトと同じフォルダ |
+| `-PythonPath` | python.exe のパス | 自動検出 |
+| `-Username` | 実行ユーザー | 現在のユーザー |
+| `-DryRun` | 登録せずに設定内容を確認 | — |
+
+```powershell
+# 例: 設定内容を確認してから登録
+.\setup_scheduler.ps1 -DryRun
+
+# 例: フォルダとPythonパスを明示指定
+.\setup_scheduler.ps1 -BotDir "C:\bots\usdjpy" -PythonPath "C:\Python312\python.exe"
+```
+
+### タスクの管理
+
+```powershell
+# 今すぐ起動
+Start-ScheduledTask -TaskName "USDJPYTradingBot"
+
+# 停止
+Stop-ScheduledTask -TaskName "USDJPYTradingBot"
+
+# 削除
+Unregister-ScheduledTask -TaskName "USDJPYTradingBot"
+```
+
+---
+
 ## ファイル構成
 
 ```
 ├── bot.py                   # メインボット（エントリーポイント）
 ├── backtest.py              # 過去データでの検証ツール
+├── setup_scheduler.ps1      # Windowsタスクスケジューラ設定スクリプト
 ├── requirements.txt
 ├── .env.example
 └── trading_bot/
