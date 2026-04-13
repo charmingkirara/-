@@ -424,10 +424,14 @@ def _evaluate_range_entry(df: pd.DataFrame, meta: dict) -> TradeSetup:
                       and sma20_dir == "down" and sma50_dir in ("down", "flat"))
 
     if breakout_long:
-        sl_candidate = rh - pip * 3   # SL just inside the broken range
+        sl_candidate = rh - pip * 3
         min_sl = close - config.STOP_LOSS_PIPS * pip
-        sl = min(sl_candidate, min_sl)  # Ensure minimum SL distance
-        tp = rh + (rh - rl) * 0.8
+        sl = min(sl_candidate, min_sl)
+        risk = close - sl
+        # TP: at least 1.5x risk, or range width extension
+        tp_range = rh + (rh - rl) * 1.5
+        tp_risk  = close + risk * 1.5
+        tp = max(tp_range, tp_risk)
         return TradeSetup(
             signal=Signal.LONG,
             entry_price=close,
@@ -441,6 +445,12 @@ def _evaluate_range_entry(df: pd.DataFrame, meta: dict) -> TradeSetup:
 
     if breakout_short:
         sl_candidate = rl + pip * 3
+        min_sl = close + config.STOP_LOSS_PIPS * pip
+        sl = max(sl_candidate, min_sl)
+        risk = sl - close
+        tp_range = rl - (rh - rl) * 1.5
+        tp_risk  = close - risk * 1.5
+        tp = min(tp_range, tp_risk)
         min_sl = close + config.STOP_LOSS_PIPS * pip
         sl = max(sl_candidate, min_sl)  # Ensure minimum SL distance
         tp = rl - (rh - rl) * 0.8

@@ -77,7 +77,7 @@ UNITS = 1000                 # Trade size (adjust to your account)
 
 # TP/SL spread buffer: TP/SLもスプレッド分を引いておく
 SPREAD_BUFFER_PIPS = 5       # 余裕があれば5~10pips。最低2.5pips
-MIN_RISK_REWARD = 1.0        # Minimum R:R ratio (1:1 ~ 1:2)
+MIN_RISK_REWARD = 0.5        # Minimum R:R ratio (緩和: 0.5以上でエントリー)
 
 # ── Breakeven / Trailing ────────────────────────────────────────────────────────
 # シグナル発生点から20pips以上伸びたら建値を検討、その後さらに10~20pips
